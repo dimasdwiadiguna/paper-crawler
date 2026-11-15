@@ -1,9 +1,10 @@
 import { check, chunk, db } from "./db";
+import type { VenueRules } from "../venue";
 import { getTopic, listTopics, loadVenueRules, PAPER_COLUMNS } from "./repo";
 import { recomputeScores } from "./scores";
 import { matchesTopic } from "../matcher";
 import { dedupeKey, mergeIntoRow, mergeSourcePapers } from "../merge";
-import { paperText, titleHash } from "../text";
+import { normalizeDoi, paperText, titleHash } from "../text";
 import { DEFAULT_OPENALEX_LOOKBACK_DAYS, fetchOpenAlexPage, lookupByDois } from "../sources/openalex";
 import { fetchCrossrefPage } from "../sources/crossref";
 import { fetchEpmcPage } from "../sources/europepmc";
@@ -95,12 +96,13 @@ export async function fetchSourcePage(
   window: CrawlWindow,
   cursor: string | null,
   lookbackDays = DEFAULT_OPENALEX_LOOKBACK_DAYS,
+  cap = DEFAULT_CAP,
 ): Promise<PageResult> {
   switch (source) {
     case "openalex":
       return fetchOpenAlexPage(topic, window, cursor, { lookbackDays });
     case "crossref":
-      return fetchCrossrefPage(topic, window, cursor);
+      return fetchCrossrefPage(topic, window, cursor, cap);
     case "europepmc":
       return fetchEpmcPage(topic, window, cursor);
   }
@@ -121,6 +123,8 @@ export interface StepResult extends StepCounts {
   total: number | null;
   error: string | null;
   warning: string | null;
+  /** e.g. "query 2/8" (Crossref sub-queries) */
+  label?: string | null;
 }
 
 /** Fill fields / ISSN-L for Crossref & Europe PMC records from OpenAlex, by DOI in batches of 50. */
@@ -144,35 +148,73 @@ async function enrichFromOpenAlex(papers: SourcePaper[]): Promise<string | null>
   }
 }
 
-/** Store matched records: dedupe against the DB, merge, insert/update, link to the topic. */
+/** Persistence used by the crawl. Supabase in the app; swappable for tests and the local test crawl. */
+export interface PaperStore {
+  venueRules(): Promise<VenueRules>;
+  findByDois(dois: string[]): Promise<PaperRow[]>;
+  findByTitleHashes(hashes: string[]): Promise<PaperRow[]>;
+  insert(rows: PaperRow[]): Promise<number[]>;
+  /** Must not write label / labeled_at / score / first_seen_run_id. */
+  update(rows: PaperRow[]): Promise<void>;
+  linkTopic(paperIds: number[], topicId: string): Promise<void>;
+}
+
+export const supabaseStore: PaperStore = {
+  venueRules: loadVenueRules,
+  async findByDois(dois) {
+    const out: PaperRow[] = [];
+    for (const part of chunk(dois, 80)) out.push(...((check(await db().from("papers").select(PAPER_COLUMNS).in("doi", part)) as unknown) as PaperRow[]));
+    return out;
+  },
+  async findByTitleHashes(hashes) {
+    const out: PaperRow[] = [];
+    for (const part of chunk(hashes, 80)) out.push(...((check(await db().from("papers").select(PAPER_COLUMNS).in("title_hash", part)) as unknown) as PaperRow[]));
+    return out;
+  },
+  async insert(rows) {
+    const res = check(await db().from("papers").insert(rows.map(insertPayload)).select("id")) as { id: number }[];
+    return res.map((r) => r.id);
+  },
+  async update(rows) {
+    const res = await db().from("papers").upsert(rows.map(updatePayload), { onConflict: "id" });
+    if (res.error) throw new Error(res.error.message);
+  },
+  async linkTopic(ids, topicId) {
+    const res = await db()
+      .from("paper_topics")
+      .upsert(
+        ids.map((id) => ({ paper_id: id, topic_group_id: topicId })),
+        { onConflict: "paper_id,topic_group_id", ignoreDuplicates: true },
+      );
+    if (res.error) throw new Error(res.error.message);
+  },
+};
+
+/** Store matched records: dedupe against the store, merge, insert/update, link to the topic. */
 export async function storePapers(
   records: SourcePaper[],
   topicId: string,
   runId: number,
+  store: PaperStore = supabaseStore,
 ): Promise<Pick<StepCounts, "new" | "dupes" | "filtered">> {
-  const rules = await loadVenueRules();
+  const rules = await store.venueRules();
+  records = records.map((r) => ({ ...r, doi: normalizeDoi(r.doi) }));
   const dois = [...new Set(records.map((r) => r.doi).filter((d): d is string => !!d))];
   const hashes = [...new Set(records.map((r) => titleHash(r.title, r.year)))];
   const byDoi = new Map<string, PaperRow>();
   const byHash = new Map<string, PaperRow>();
-  for (const part of chunk(dois, 80)) {
-    for (const r of check(await db().from("papers").select(PAPER_COLUMNS).in("doi", part)) as unknown as PaperRow[]) byDoi.set(r.doi!, r);
-  }
-  for (const part of chunk(hashes, 80)) {
-    const rows = check(await db().from("papers").select(PAPER_COLUMNS).in("title_hash", part)) as unknown as PaperRow[];
-    // Title-hash matching only joins a DOI-less row, or a DOI-less incoming record.
-    for (const r of rows) if (!byHash.has(r.title_hash) || !r.doi) byHash.set(r.title_hash, r);
-  }
+  if (dois.length) for (const r of await store.findByDois(dois)) byDoi.set(r.doi!, r);
+  // Title-hash matching only joins a DOI-less row, or a DOI-less incoming record.
+  for (const r of await store.findByTitleHashes(hashes)) if (!byHash.has(r.title_hash) || !r.doi) byHash.set(r.title_hash, r);
 
   const inserts: PaperRow[] = [];
   const updates: PaperRow[] = [];
   let dupes = 0;
   let filtered = 0;
   for (const rec of records) {
-    const h = titleHash(rec.title, rec.year);
     let existing = rec.doi ? byDoi.get(rec.doi) : undefined;
     if (!existing) {
-      const cand = byHash.get(h);
+      const cand = byHash.get(titleHash(rec.title, rec.year));
       if (cand && (!cand.doi || !rec.doi)) existing = cand;
     }
     const row = mergeIntoRow(existing ?? null, rec, rules, runId);
@@ -186,25 +228,13 @@ export async function storePapers(
   }
 
   const ids: number[] = [];
-  if (inserts.length) {
-    const rows = check(await db().from("papers").insert(inserts.map(insertPayload)).select("id")) as { id: number }[];
-    ids.push(...rows.map((r) => r.id));
-  }
+  if (inserts.length) ids.push(...(await store.insert(inserts)));
+  // Updates never write label/labeled_at/score/first_seen, so labeling during a run is never overwritten.
   if (updates.length) {
-    // Never write label/labeled_at/score/first_seen here, so labeling during a run is never overwritten.
-    const res = await db().from("papers").upsert(updates.map(updatePayload), { onConflict: "id" });
-    if (res.error) throw new Error(res.error.message);
+    await store.update(updates);
     ids.push(...updates.map((u) => u.id!));
   }
-  if (ids.length) {
-    const res = await db()
-      .from("paper_topics")
-      .upsert(
-        ids.map((id) => ({ paper_id: id, topic_group_id: topicId })),
-        { onConflict: "paper_id,topic_group_id", ignoreDuplicates: true },
-      );
-    if (res.error) throw new Error(res.error.message);
-  }
+  if (ids.length) await store.linkTopic(ids, topicId);
   return { new: inserts.length, dupes, filtered };
 }
 
@@ -236,6 +266,47 @@ export function matchAndCollapse(records: SourcePaper[], topic: TopicGroup): { k
   return { kept: [...byKey.values()], nomatch };
 }
 
+function emptyResult(): StepResult {
+  return { fetched: 0, nomatch: 0, new: 0, dupes: 0, filtered: 0, done: true, nextCursor: null, capHit: false, total: null, error: null, warning: null };
+}
+
+/** One page of one (topic, source): fetch, match locally, enrich fields, store. Never throws. */
+export async function processPage(input: {
+  topic: TopicGroup;
+  pair: Pick<RunPair, "source" | "window">;
+  cursor: string | null;
+  fetchedSoFar: number;
+  runId: number;
+  cap: number;
+  lookbackDays: number;
+  store?: PaperStore;
+}): Promise<StepResult> {
+  const counts: StepCounts = { fetched: 0, nomatch: 0, new: 0, dupes: 0, filtered: 0 };
+  try {
+    const page = await fetchSourcePage(input.pair.source, input.topic, input.pair.window, input.cursor, input.lookbackDays, input.cap);
+    counts.fetched = page.records.length + page.skipped;
+    const { kept, nomatch } = matchAndCollapse(page.records, input.topic);
+    counts.nomatch = nomatch + page.skipped;
+    const warning = await enrichFromOpenAlex(kept);
+    if (kept.length) Object.assign(counts, await storePapers(kept, input.topic.id, input.runId, input.store));
+    const total = input.fetchedSoFar + counts.fetched;
+    const stopHere = !!page.nextCursor && total >= input.cap;
+    const capHit = stopHere || !!page.truncated;
+    return {
+      ...counts,
+      done: !page.nextCursor || stopHere,
+      nextCursor: stopHere ? null : page.nextCursor,
+      capHit,
+      total: page.total,
+      error: null,
+      warning,
+      label: page.label ?? null,
+    };
+  } catch (e) {
+    return { ...counts, done: true, nextCursor: null, capHit: false, total: null, error: (e as Error).message, warning: null };
+  }
+}
+
 export async function runStep(input: {
   runId: number;
   pair: number;
@@ -252,31 +323,10 @@ export async function runStep(input: {
   if (run.status !== "running") throw new Error(`Run ${run.id} is ${run.status}`);
   const pair = run.params.pairs[input.pair];
   if (!pair) throw new Error("Unknown step");
-  const counts: StepCounts = { fetched: 0, nomatch: 0, new: 0, dupes: 0, filtered: 0 };
-  let result: StepResult;
-  try {
-    const topic = await getTopic(pair.topicId);
-    if (!topic) throw new Error("Topic group was deleted");
-    const page = await fetchSourcePage(pair.source, topic, pair.window, input.cursor, run.params.lookbackDays);
-    counts.fetched = page.records.length + page.skipped;
-    const { kept, nomatch } = matchAndCollapse(page.records, topic);
-    counts.nomatch = nomatch + page.skipped;
-    const warning = await enrichFromOpenAlex(kept);
-    if (kept.length) Object.assign(counts, await storePapers(kept, topic.id, run.id));
-    const total = input.fetchedSoFar + counts.fetched;
-    const capHit = !!page.nextCursor && total >= run.params.cap;
-    result = {
-      ...counts,
-      done: !page.nextCursor || capHit,
-      nextCursor: capHit ? null : page.nextCursor,
-      capHit,
-      total: page.total,
-      error: null,
-      warning,
-    };
-  } catch (e) {
-    result = { ...counts, done: true, nextCursor: null, capHit: false, total: null, error: (e as Error).message, warning: null };
-  }
+  const topic = await getTopic(pair.topicId);
+  const result = topic
+    ? await processPage({ topic, pair, cursor: input.cursor, fetchedSoFar: input.fetchedSoFar, runId: run.id, cap: run.params.cap, lookbackDays: run.params.lookbackDays })
+    : { ...emptyResult(), error: "Topic group was deleted" };
 
   const ins = await db().from("run_steps").insert({
     run_id: run.id,

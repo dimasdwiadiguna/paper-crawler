@@ -227,7 +227,8 @@ export default function TopicPage() {
               </div>
             ))}
           <p className="text-xs text-stone-500">
-            Crossref&apos;s search is relevance-ranked, so it gets the plain words; every source is then checked by the same local boolean rule.
+            Crossref&apos;s search is relevance-ranked and needs most query words to match, so it gets one plain-word query per term of
+            block 1 (put the most specific concept first). Every source is then checked by the same local boolean rule.
           </p>
         </div>
       </section>

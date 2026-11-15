@@ -19,9 +19,25 @@ export const POST = route<{ params: Promise<{ id: string }> }>(async (req, { par
   const results = await Promise.all(
     SOURCES.map(async (source) => {
       try {
-        const page = await fetchSourcePage(source, topic, window, null);
-        const { kept } = matchAndCollapse(page.records, topic);
-        return { source, total: page.total, sampled: page.records.length + page.skipped, matched: kept.length, error: null };
+        if (source !== "crossref") {
+          const page = await fetchSourcePage(source, topic, window, null);
+          const { kept } = matchAndCollapse(page.records, topic);
+          return { source, total: page.total, sampled: page.records.length + page.skipped, matched: kept.length, error: null };
+        }
+        // Crossref: the first page (20 results) of every sub-query; "hits" is summed over sub-queries.
+        let cursor: string | null = null;
+        let total = 0;
+        let sampled = 0;
+        const matched = new Set<string>();
+        for (let i = 0; i < 20; i++) {
+          const page = await fetchSourcePage(source, topic, window, cursor, undefined, 1);
+          total += page.total ?? 0;
+          sampled += page.records.length + page.skipped;
+          for (const p of matchAndCollapse(page.records, topic).kept) matched.add(p.doi ?? p.title);
+          cursor = page.nextCursor;
+          if (!cursor) break;
+        }
+        return { source, total, sampled, matched: matched.size, error: null };
       } catch (e) {
         return { source, total: null, sampled: 0, matched: 0, error: (e as Error).message };
       }

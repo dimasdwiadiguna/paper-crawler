@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildOpenAlexSearch, buildOpenAlexUrl, mapOpenAlexType, normalizeOpenAlexWork } from "@/lib/sources/openalex";
-import { buildCrossrefQuery, buildCrossrefUrl, mapCrossrefType, normalizeCrossrefItem } from "@/lib/sources/crossref";
+import { buildCrossrefQuery, buildCrossrefSubqueries, buildCrossrefUrl, crossrefShare, mapCrossrefType, normalizeCrossrefItem } from "@/lib/sources/crossref";
 import { buildEpmcQuery, buildEpmcTopicQuery, mapEpmcType, normalizeEpmcResult } from "@/lib/sources/europepmc";
 import type { CrawlWindow } from "@/lib/types";
 
@@ -55,13 +55,30 @@ describe("Crossref query builder", () => {
   it("sends distinct words of block terms, without excludes", () => {
     expect(buildCrossrefQuery(group)).toBe("soft sensor kalman filter observer fermentation fed batch");
   });
+  it("builds one sub-query per first-block term plus the other blocks' words", () => {
+    expect(buildCrossrefSubqueries(group)).toEqual([
+      "soft sensor fermentation fed batch",
+      "kalman filter fermentation fed batch",
+      "observer fermentation fed batch",
+    ]);
+    expect(buildCrossrefSubqueries({ blocks: [["fermentation"], ["fermentation", "yeast"]] })).toEqual(["fermentation yeast"]);
+    expect(buildCrossrefSubqueries({ blocks: [] })).toEqual([]);
+  });
+  it("splits the cap across sub-queries", () => {
+    expect(crossrefShare(500, 8)).toBe(62);
+    expect(crossrefShare(50, 8)).toBe(20);
+  });
   it("uses created-date (not index-date) for incremental runs, with 1 day overlap", () => {
-    const f = new URL(buildCrossrefUrl(group, incr, null)).searchParams.get("filter")!;
+    const u = new URL(buildCrossrefUrl("soft sensor fermentation", incr, 0));
+    expect(u.searchParams.get("cursor")).toBeNull(); // cursor paging loses relevance order
+    expect(u.searchParams.get("offset")).toBe("0");
+    expect(u.searchParams.get("query.bibliographic")).toBe("soft sensor fermentation");
+    const f = u.searchParams.get("filter")!;
     expect(f).toContain("from-created-date:2026-11-09");
     expect(f).toContain("until-created-date:2026-11-15");
     expect(f).toContain("type:journal-article,type:posted-content,type:proceedings-article");
     expect(f).not.toContain("index-date");
-    const f2 = new URL(buildCrossrefUrl(group, initial, null)).searchParams.get("filter")!;
+    const f2 = new URL(buildCrossrefUrl("q", initial)).searchParams.get("filter")!;
     expect(f2).toContain("from-pub-date:2026-10-01,until-pub-date:2026-10-31");
   });
   it("maps types and strips JATS", () => {

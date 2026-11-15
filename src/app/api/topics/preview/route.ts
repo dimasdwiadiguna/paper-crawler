@@ -1,6 +1,6 @@
 import { body, json, route } from "@/lib/server/http";
 import { buildOpenAlexSearch, buildOpenAlexUrl, DEFAULT_OPENALEX_LOOKBACK_DAYS } from "@/lib/sources/openalex";
-import { buildCrossrefQuery, buildCrossrefUrl } from "@/lib/sources/crossref";
+import { buildCrossrefSubqueries, buildCrossrefUrl } from "@/lib/sources/crossref";
 import { buildEpmcQuery, buildEpmcUrl } from "@/lib/sources/europepmc";
 import type { CrawlWindow, TopicGroup } from "@/lib/types";
 import { addDays, toDate } from "@/lib/sources/http";
@@ -15,7 +15,10 @@ export const POST = route(async (req) => {
   return json({
     window: w,
     openalex: { query: buildOpenAlexSearch(group), url: strip(buildOpenAlexUrl(group, w, null, { lookbackDays: DEFAULT_OPENALEX_LOOKBACK_DAYS })) },
-    crossref: { query: buildCrossrefQuery(group), url: strip(buildCrossrefUrl(group, w, null)) },
+    crossref: (() => {
+      const subs = buildCrossrefSubqueries(group);
+      return { query: subs.map((q, i) => `${i + 1}. ${q}`).join("\n"), url: subs[0] ? strip(buildCrossrefUrl(subs[0], w)) : "" };
+    })(),
     europepmc: { query: buildEpmcQuery(group, w), url: buildEpmcUrl(group, w, null) },
   });
 });

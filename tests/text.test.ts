@@ -12,6 +12,11 @@ describe("rebuildAbstract", () => {
     expect(rebuildAbstract(null)).toBeNull();
     expect(rebuildAbstract({})).toBeNull();
   });
+  it("drops a leading 'Abstract' heading but keeps 'Abstract reasoning'", () => {
+    expect(rebuildAbstract({ Abstract: [0], This: [1], study: [2] })).toBe("This study");
+    expect(stripJats("Abstract reasoning in models")).toBe("Abstract reasoning in models");
+    expect(stripJats("ABSTRACT. Background")).toBe("Background");
+  });
   it("tolerates gaps in positions", () => {
     expect(rebuildAbstract({ a: [0], c: [2] })).toBe("a c");
   });

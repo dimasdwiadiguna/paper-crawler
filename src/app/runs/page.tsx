@@ -28,6 +28,7 @@ interface StepResult {
   total: number | null;
   error: string | null;
   warning: string | null;
+  label?: string | null;
 }
 interface Counts {
   fetched: number;
@@ -60,6 +61,7 @@ interface PairProgress extends Counts {
   total: number | null;
   error: string | null;
   warnings: string[];
+  label: string | null;
 }
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
@@ -131,6 +133,7 @@ export default function RunsPage() {
         total: null,
         error: null,
         warnings: [],
+        label: null,
       }));
       setProgress([...prog]);
 
@@ -141,7 +144,7 @@ export default function RunsPage() {
         for (let page = 1; ; page++) {
           if (stop.current) break;
           p.page = page;
-          setStatus(`${p.pair.topicName} · ${SOURCE_LABELS[p.pair.source]} · page ${page} · ${p.new} new`);
+          setStatus(`${p.pair.topicName} · ${SOURCE_LABELS[p.pair.source]} · page ${page}${p.label ? ` (${p.label})` : ""} · ${p.new} new`);
           setProgress([...prog]);
           let r: StepResult;
           try {
@@ -158,6 +161,7 @@ export default function RunsPage() {
           p.filtered += r.filtered;
           p.total = r.total ?? p.total;
           p.capHit ||= r.capHit;
+          p.label = r.label ?? null;
           if (r.warning) p.warnings.push(r.warning);
           if (r.error) {
             p.error = r.error;
@@ -288,7 +292,13 @@ export default function RunsPage() {
                       </span>{" "}
                       {p.pair.topicName} · {SOURCE_LABELS[p.pair.source]}
                       {p.page > 0 && <span className="text-xs text-stone-500"> · p{p.page}</span>}
-                      {p.capHit && <div className="text-xs text-amber-700 dark:text-amber-400">Cap of {cap} hit — narrow the query to see everything.</div>}
+                      {p.capHit && (
+                        <div className="text-xs text-amber-700 dark:text-amber-400">
+                          {p.pair.source === "crossref"
+                            ? `Cap of ${cap} reached while results were still on topic — narrow the query or raise the cap.`
+                            : `Cap of ${cap} hit — narrow the query to see everything.`}
+                        </div>
+                      )}
                       {p.error && <div className="text-xs text-red-600">{p.error}</div>}
                       {p.warnings.length > 0 && <div className="text-xs text-amber-700">{p.warnings[0]}</div>}
                     </td>

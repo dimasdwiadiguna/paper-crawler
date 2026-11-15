@@ -43,8 +43,13 @@ export function stripJats(input: string | null | undefined): string | null {
   s = s.replace(/<[^>]+>/g, "");
   s = decodeEntities(s);
   s = s.replace(/\s+/g, " ").trim();
-  s = s.replace(/^abstract[:.\s]+/i, "").trim();
+  s = dropAbstractHeading(s);
   return s.length ? s : null;
+}
+
+/** "Abstract: Text", "ABSTRACT Text", "Abstract This study…" -> "Text…" (keeps "Abstract reasoning…"). */
+export function dropAbstractHeading(s: string): string {
+  return s.replace(/^(?:abstract|ABSTRACT|Abstract)(?:\s*[:.\-–—]\s*|\s+(?=[A-Z]))/, "").trim();
 }
 
 /** Strip tags from short strings (titles). */
@@ -82,7 +87,7 @@ export function rebuildAbstract(index: Record<string, number[]> | null | undefin
   for (const [word, positions] of Object.entries(index)) {
     for (const p of positions) words[p] = word;
   }
-  const text = words.filter((w) => w !== undefined).join(" ").replace(/\s+/g, " ").trim();
+  const text = dropAbstractHeading(words.filter((w) => w !== undefined).join(" ").replace(/\s+/g, " ").trim());
   return text.length ? text : null;
 }
 

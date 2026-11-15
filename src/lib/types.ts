@@ -98,4 +98,8 @@ export interface PageResult {
   skipped: number;
   nextCursor: string | null;
   total: number | null;
+  /** The source stopped early because of the cap while results were still relevant (Crossref). */
+  truncated?: boolean;
+  /** Progress label within the step, e.g. "query 2/8" for Crossref's sub-queries. */
+  label?: string;
 }
